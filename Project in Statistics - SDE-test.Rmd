@@ -1,0 +1,810 @@
+---
+title: "Project in Statistics - Stochastic Differential Equations"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Packages
+```{r, message=FALSE}
+library(curl)
+library(tidyverse)
+library(zoo)
+library(expm)
+```
+
+
+# SDE
+
+## Data
+```{r, include=FALSE}
+excel_url <- "https://www.iceandclimate.nbi.ku.dk/data/GICC05modelext_GRIP_and_GISP2_and_resampled_data_series_Seierstad_et_al._2014_version_10Dec2014-2.xlsx"
+
+data_file <- file.path("/Users/valdemarcronfeldschaaf/Desktop/Matematik/Kandidat/25:26/Blok 4/Project in Statistics", "Ca2data.csv")
+
+res <- httr::GET(excel_url)
+excel_file <- tempfile(fileext = ".xlsx")
+writeBin(httr::content(res, as = "raw"), excel_file)
+Ca2data <- readxl::read_excel(excel_file, sheet = 3,
+range = "A51:I12278") %>%
+dplyr::slice(-1) %>%
+dplyr::select(1, ncol(.) - 1, ncol(.)) %>%
+dplyr::mutate_all(as.numeric) %>%
+dplyr::rename(age = 1, d18O = 2, Ca2 = 3)
+unlink(excel_file)
+readr::write_csv(Ca2data, data_file)
+```
+
+```{r}
+head(Ca2data)
+```
+### ... data
+```{r}
+Ca2_final <- Ca2data %>%
+  select(-d18O) %>%
+  filter(age >= 30000, age <= 80000) %>%
+  mutate(Ca2 = na.approx(Ca2)) %>%
+  group_by(age) %>%
+  summarise(Ca2 = mean(Ca2), .groups = "drop") %>%
+  mutate(Ca2 = -log(Ca2)) %>%
+  mutate(X = Ca2 - mean(Ca2)) %>%
+  select(-Ca2) %>%
+  mutate(age = age/1000) %>%
+  mutate(V = (lead(X) - X)/0.02)
+
+head(Ca2_final)
+```
+
+## Implementing our functions
+
+Our functions should depend on data and theta, with theta being
+
+\begin{align*}
+\theta=(\eta,a,b,c,d,\alpha,\beta,\gamma)
+\end{align*}
+
+\begin{align*}
+\eta &\geq 0 \\
+a &< 0 \\
+\beta^2 &< 4 \alpha \gamma \\
+0 < \alpha &< 2 \eta
+\end{align*}
+
+
+### theta
+```{r}
+# theta = (eta,a,b,c,d,alpha,beta,gamma)
+theta <- c(1,2,3,4,5,6,7,8)
+# eta >= 0
+# a < 0
+# beta^2 < 4*alpha*gamma
+# 0 < alpha < 2*eta
+
+```
+
+### $A$
+```{r}
+A <- function(theta){
+  A <- matrix(c(0, theta[4], 1, -theta[1]), nrow = 2, ncol = 2)
+  return(A)
+}
+```
+
+### $b$
+```{r}
+b <- function(theta){
+  b <- matrix(c(theta[5]/theta[4],0 ), nrow = 2, ncol = 1)
+  return(b)
+}
+```
+
+### $\mu$
+```{r}
+mu <- function(data,theta){
+  mu <- expm(A*h) %*% (data$X-b(theta)) + b(theta)
+  return(b)
+}
+```
+
+### Defining $\breve{\alpha}$ and $\breve{\beta}$
+```{r}
+d <- 2
+
+# alpha^{ij} matrices
+alpha11 <- matrix(0, d, d)
+alpha12 <- matrix(0, d, d)
+alpha21 <- matrix(0, d, d)
+alpha22 <- matrix(c(0, 0,
+                    0, theta[6]),
+                  nrow = d, byrow = TRUE)
+
+# beta^{ij} vectors
+beta11 <- c(0, 0)
+beta12 <- c(0, 0)
+beta21 <- c(0, 0)
+beta22 <- c(0, theta[7])
+
+# alpha breve: rows are vec(alpha^{ij})^T
+# R's as.vector() uses column-wise vectorization, matching mathematical vec()
+alpha_breve <- rbind(
+  as.vector(alpha11),
+  as.vector(alpha12),
+  as.vector(alpha21),
+  as.vector(alpha22)
+)
+
+# beta breve: rows are beta^{ij}^T
+beta_breve <- rbind(
+  beta11,
+  beta12,
+  beta21,
+  beta22
+)
+
+alpha_breve
+beta_breve
+
+alpha_breve_fun <- function(theta) {
+  alpha22 <- matrix(c(0, 0,
+                      0, theta[6]),
+                    nrow = d, byrow = TRUE)
+
+  rbind(
+    as.vector(alpha11),
+    as.vector(alpha12),
+    as.vector(alpha21),
+    as.vector(alpha22)
+  )
+}
+
+beta_breve_fun <- function(theta) {
+  beta22 <- c(0, theta[7])
+
+  rbind(
+    beta11,
+    beta12,
+    beta21,
+    beta22
+  )
+}
+```
+### $M_1-M_5$
+```{r}
+kronecker_sum <- function(A, B) {
+  m <- nrow(A)
+  n <- nrow(B)
+
+  kronecker(A, diag(n)) + kronecker(diag(m), B)
+}
+```
+
+```{r}
+M1 <- function(theta){
+  A_kron <- kronecker_sum(A(theta), A(theta))
+  M <- rbind(
+    cbind(A_kron + alpha_breve_fun(theta), alpha_breve_fun(theta)),
+    cbind(matrix(0,4,4),     A_kron)
+  )
+
+  return(M)
+}
+
+M2 <- function(theta){
+  A_theta <- A(theta)
+  A_kron <- kronecker_sum(A_theta, A_theta)
+  alpha_breve <- alpha_breve_fun(theta)
+
+  M <- rbind(
+    cbind(A_kron + alpha_breve, alpha_breve),
+    cbind(matrix(0,4,4),     kronecker_sum(diag(2), A_theta))
+  )
+
+  return(M)
+}
+
+M3 <- function(theta){
+  A_theta <- A(theta)
+  A_kron <- kronecker_sum(A_theta, A_theta)
+  alpha_breve <- alpha_breve_fun(theta)
+
+  M <- rbind(
+    cbind(A_kron + alpha_breve, alpha_breve),
+    cbind(matrix(0,4,4),     kronecker_sum(A_theta, diag(2)))
+  )
+
+  return(M)
+}
+
+M4 <- function(theta){
+  A_theta <- A(theta)
+  A_kron <- kronecker_sum(A_theta, A_theta)
+  alpha_breve <- alpha_breve_fun(theta)
+  beta_breve <- beta_breve_fun(theta)
+
+  M <- rbind(
+    cbind(A_kron + alpha_breve, beta_breve),
+    cbind(matrix(0,2,4), A_theta)
+  )
+
+  return(M)
+}
+
+M5 <- function(theta){
+  A_kron <- kronecker_sum(A(theta), A(theta))
+  alpha_breve <- alpha_breve_fun(theta)
+
+  M <- rbind(
+    cbind(A_kron + alpha_breve, diag(1,4,4)),
+    cbind(matrix(0,4,4), matrix(0,4,4))
+  )
+
+  return(M)
+}
+```
+
+
+### $I_1-I_5$
+```{r}
+I1 <- function(h,theta){
+  I <- expm(M1(theta)*h)
+  return(I[1:4,5:8])
+}
+
+I2 <- function(h,theta){
+  I <- expm(M2(theta)*h)
+  return(I[1:4,5:8])
+}
+
+I3 <- function(h,theta){
+  I <- expm(M3(theta)*h)
+  return(I[1:4,5:8])
+}
+
+I4 <- function(h,theta){
+  I <- expm(M4(theta)*h)
+  return(I[1:4,5:6])
+}
+
+I5 <- function(h,theta){
+  I <- expm(M5(theta)*h)
+  return(I[1:4,5:8])
+}
+```
+
+### $\Omega$
+```{r}
+Omega_vec <- function(x, h, theta) {
+  x <- as.matrix(x)
+  b_theta <- as.numeric(b(theta))
+  x_minus_b <- sweep(x, 2, b_theta, "-")
+
+  I1_mat <- I1(h, theta)
+  I2_mat <- I2(h, theta)
+  #I3_mat <- I3(h, theta)
+  I4_mat <- I4(h, theta)
+  I5_mat <- I5(h, theta)
+
+  y1 <- x_minus_b[, 1]
+  y2 <- x_minus_b[, 2]
+  b1 <- b_theta[1]
+  b2 <- b_theta[2]
+
+  term1 <- rbind(y1 * y1, y2 * y1, y1 * y2, y2 * y2)
+  term2 <- rbind(y1 * b1, y2 * b1, y1 * b2, y2 * b2)
+  term3 <- rbind(b1 * y1, b2 * y1, b1 * y2, b2 * y2)
+  term4 <- t(x_minus_b)
+  term5 <- c(0,0,0,theta[8])
+  term5_repeated <- matrix(I5_mat %*% term5, nrow = 4, ncol = nrow(x), byrow = FALSE)
+
+  I1_mat %*% term1 +
+    I2_mat %*% term2 +
+    I2_mat %*% term3 +
+    I4_mat %*% term4 +
+    term5_repeated
+}
+
+#Omega(c(0, 0), h = 0.02, theta = theta)
+```
+
+### Pseudo log-likelihood
+```{r}
+F_fun <- function(x, theta) {
+  x <- as.numeric(x)
+
+  matrix(c(
+    x[2],
+    -theta[1] * x[2] +
+      theta[2] * x[1]^3 +
+      theta[3] * x[1]^2 +
+      theta[4] * x[1] +
+      theta[5]
+  ), nrow = 2, ncol = 1)
+}
+
+#N_fun <- function(x, theta) {
+  #x <- matrix(x, nrow = 2, ncol = 1)
+  #F_fun(x, theta) - A(theta) %*% (x - b(theta))
+#}
+
+N_mat <- function(x, theta) {
+  x <- as.matrix(x)
+  b_theta <- as.numeric(b(theta))
+
+  F <- cbind(
+    x[, 2],
+    -theta[1] * x[, 2] +
+      theta[2] * x[, 1]^3 +
+      theta[3] * x[, 1]^2 +
+      theta[4] * x[, 1] +
+      theta[5]
+  )
+
+  linear_part <- t(A(theta) %*% t(sweep(x, 2, b_theta, "-")))
+  F - linear_part
+}
+
+DN_fun <- function(x, theta) {
+  x <- as.numeric(x)
+  DF <- matrix(c(
+    0,
+    3 * theta[2] * x[1]^2 + 2 * theta[3] * x[1] + theta[4],
+    1,
+    -theta[1]
+  ), nrow = 2, ncol = 2)
+
+  DF - A(theta)
+}
+
+f_half <- function(x, h, theta) {
+  x <- matrix(x, nrow = 2, ncol = 1)
+  x + (h / 2) * N_fun(x, theta)
+}
+
+f_half_inverse <- function(x, h, theta) {
+  x <- matrix(x, nrow = 2, ncol = 1)
+  x - (h / 2) * N_fun(x, theta)
+}
+
+pseudo_loglikelihood <- function(data, h, theta) {
+  X <- as.matrix(data[, c("X", "V")])
+  X <- X[complete.cases(X), , drop = FALSE]
+
+  #if (nrow(X) < 2) {
+    #stop("Need at least two observations.")
+  #}
+
+  x_now <- X[-nrow(X), , drop = FALSE]
+  x_next <- X[-1, , drop = FALSE]
+
+  N_now <- N_mat(x_now, theta)
+  N_next <- N_mat(x_next, theta)
+
+  x_half <- x_now + (h / 2) * N_now
+  x_next_back <- x_next - (h / 2) * N_next
+
+  exp_Ah <- expm(A(theta) * h)
+  b_theta <- as.numeric(b(theta))
+  mean_k <- t(exp_Ah %*% t(sweep(x_half, 2, b_theta, "-")))
+  mean_k <- sweep(mean_k, 2, b_theta, "+")
+
+  residual <- x_next_back - mean_k
+  omega_vec <- Omega_vec(x_half, h, theta)
+
+  omega11 <- omega_vec[1, ]
+  omega21 <- omega_vec[2, ]
+  omega12 <- omega_vec[3, ]
+  omega22 <- omega_vec[4, ]
+
+  det_omega <- omega11 * omega22 - omega12 * omega21
+
+  #if (any(!is.finite(det_omega)) || any(det_omega <= 0)) {
+    #return(-Inf)
+  #}
+
+  r1 <- residual[, 1]
+  r2 <- residual[, 2]
+  quadratic <- (omega22 * r1^2 - (omega12 + omega21) * r1 * r2 + omega11 * r2^2) / det_omega
+
+  #if (any(!is.finite(quadratic))) {
+    #return(-Inf)
+  #}
+
+  -0.5 * sum(quadratic + log(det_omega))
+}
+
+pseudo_loglikelihood(Ca2_final, h = 0.02, theta_test)
+```
+
+### Minimize negative pseudo log-likelihood
+```{r}
+theta_valid <- function(theta) {
+  all(theta_checks(theta)$ok)
+}
+
+theta_checks <- function(theta) {
+  eta <- theta[1]
+  a <- theta[2]
+  alpha <- theta[6]
+  beta <- theta[7]
+  gamma <- theta[8]
+
+  data.frame(
+    condition = c(
+      "all finite",
+      "eta > 0",
+      "a < 0",
+      "alpha > 0",
+      "alpha < 2 * eta",
+      "beta^2 < 4 * alpha * gamma"
+    ),
+    value = c(
+      all(is.finite(theta)),
+      eta,
+      a,
+      alpha,
+      alpha - 2 * eta,
+      beta^2 - 4 * alpha * gamma
+    ),
+    ok = c(
+      all(is.finite(theta)),
+      eta > 0,
+      a < 0,
+      alpha > 0,
+      alpha < 2 * eta,
+      beta^2 < 4 * alpha * gamma
+    )
+  )
+}
+
+theta_to_par <- function(theta) {
+  #if (!theta_valid(theta)) {
+    #stop("theta_start does not satisfy the parameter constraints.")
+  #}
+
+  eta <- theta[1]
+  alpha_fraction <- theta[6] / (2 * eta)
+  gamma_extra <- theta[8] - theta[7]^2 / (4 * theta[6])
+
+  c(
+    log(eta),
+    log(-theta[2]),
+    theta[3],
+    theta[4],
+    theta[5],
+    qlogis(alpha_fraction),
+    theta[7],
+    log(gamma_extra)
+  )
+}
+
+par_to_theta <- function(par) {
+  eta <- exp(par[1])
+  a <- -exp(par[2])
+  alpha <- 2 * eta * plogis(par[6])
+  beta <- par[7]
+  gamma <- beta^2 / (4 * alpha) + exp(par[8])
+
+  c(eta, a, par[3], par[4], par[5], alpha, beta, gamma)
+}
+
+negative_pseudo_loglikelihood <- function(data, h, theta) {
+  -pseudo_loglikelihood(data, h, theta)
+}
+
+minimize_theta <- function(data, h, theta_start, maxit = 1000) {
+  par_start <- theta_to_par(theta_start)
+
+  objective <- function(par) {
+    theta_try <- par_to_theta(par)
+
+    value <- tryCatch(
+      negative_pseudo_loglikelihood(data, h, theta_try),
+      error = function(e) 1e100
+    )
+
+    #if (is.finite(value)) value else 1e100
+  }
+
+  fit <- optim(
+    par = par_start,
+    fn = objective,
+    method = "L-BFGS-B",
+    control = list(
+      maxit = maxit,
+      parscale = pmax(abs(par_start), 1)
+    )
+  )
+
+  theta_hat <- par_to_theta(fit$par)
+
+  list(
+    theta_hat = theta_hat,
+    minimum = fit$value,
+    loglikelihood = -fit$value,
+    convergence = fit$convergence,
+    converged = fit$convergence == 0,
+    message = fit$message,
+    counts = fit$counts,
+    function_evaluations = fit$counts["function"],
+    theta_checks = theta_checks(theta_hat),
+    theta_valid = theta_valid(theta_hat),
+    optim = fit
+  )
+}
+```
+
+```{r, eval=FALSE}
+theta_start <- c(50, -200, 10, 100, 10, 30, -5, 1000)
+theta_2 <- c(7, -105, 11, 105, 12, 4, -4, 1256)
+theta_3 <- c(2, -214, 8, 240, 9, 1, -1, 730)
+theta_4 <- c(3, -200, 5, 323, 30, 4, 2, 239)
+
+
+fit <- minimize_theta(Ca2_final, 0.02, theta_test, maxit = 1000)
+fit$theta_hat
+fit$minimum
+fit$converged
+fit$convergence
+fit$message
+fit$counts
+fit$function_evaluations
+fit$theta_valid
+fit$theta_checks
+```
+
+### Direct minimization without reparameterization
+```{r}
+minimize_theta_direct <- function(data, h, theta_start, maxit = 1000) {
+  objective <- function(theta_try) {
+    value <- tryCatch(
+      negative_pseudo_loglikelihood(data, h, theta_try),
+      error = function(e) 1e100
+    )
+
+    #if (is.finite(value)) value else 1e100
+  }
+
+  fit <- optim(
+    par = theta_start,
+    fn = objective,
+    method = "L-BFGS-B",
+    lower = c(0, -Inf, -Inf, -Inf, -Inf, 0, -Inf, 0),
+    upper = c(-Inf, 0, -Inf, -Inf, -Inf, -Inf, -Inf, -Inf),
+    control = list(
+      maxit = maxit,
+      parscale = pmax(abs(theta_start), 1)
+    )
+  )
+
+  theta_hat <- fit$par
+
+  list(
+    theta_hat = theta_hat,
+    minimum = fit$value,
+    loglikelihood = -fit$value,
+    convergence = fit$convergence,
+    converged = fit$convergence == 0,
+    message = fit$message,
+    counts = fit$counts,
+    function_evaluations = fit$counts["function"],
+    theta_checks = theta_checks(theta_hat),
+    theta_valid = theta_valid(theta_hat),
+    optim = fit
+  )
+}
+```
+
+```{r, eval=FALSE}
+theta_new <- c(89.158540, -91.499596, 15.793264, 142.761913, 5.442896, 169.418708, -8.683637, 1262.329676)
+fit_direct <- minimize_theta_direct(
+  Ca2_final,
+  h = 0.02,
+  theta_start = theta_test,
+  maxit = 10000
+)
+
+fit_direct$theta_hat
+fit_direct$minimum
+fit_direct$converged
+fit_direct$convergence
+fit_direct$message
+fit_direct$counts
+fit_direct$function_evaluations
+
+# Test whether the estimated theta satisfies the restrictions
+fit_direct$theta_valid
+fit_direct$theta_checks
+```
+
+## Chapter 4.2 simulation study
+
+### Student Kramers simulation
+```{r}
+theta_0 <- c(30, -125, 40, 150, -20, 20, -8, 1280.8)
+theta_init <- c(50, -200, 10, 100, 10, 30, -5, 1000)
+parameter_names <- c("eta", "a", "b", "c", "d", "alpha", "beta", "gamma")
+
+simulate_student_kramers <- function(theta, T = 50, h_sim = 0.0001,
+                                     x0 = c(0, 0)) {
+  n_steps <- as.integer(T / h_sim)
+  X <- numeric(n_steps + 1)
+  V <- numeric(n_steps + 1)
+  X[1] <- x0[1]
+  V[1] <- x0[2]
+
+  eta <- theta[1]
+  a <- theta[2]
+  b_par <- theta[3]
+  c_par <- theta[4]
+  d_par <- theta[5]
+  alpha <- theta[6]
+  beta <- theta[7]
+  gamma <- theta[8]
+
+  dW <- rnorm(n_steps, mean = 0, sd = sqrt(h_sim))
+
+  for (i in seq_len(n_steps)) {
+    x <- X[i]
+    v <- V[i]
+
+    drift_v <- -eta * v + a * x^3 + b_par * x^2 + c_par * x + d_par
+    sigma2 <- alpha * v^2 + beta * v + gamma
+    sigma <- sqrt(max(sigma2, 0))
+    sigma_sigma_prime <- alpha * v + beta / 2
+
+    X[i + 1] <- x + h_sim * v
+    V[i + 1] <- v + h_sim * drift_v + sigma * dW[i] +
+      0.5 * sigma_sigma_prime * (dW[i]^2 - h_sim)
+  }
+
+  data.frame(
+    time = seq(0, T, by = h_sim),
+    X = X,
+    V = V
+  )
+}
+
+subsample_path <- function(path, h, h_sim = 0.0001) {
+  step <- as.integer(round(h / h_sim))
+  path[seq(1, nrow(path), by = step), ]
+}
+```
+
+### Repeated estimation
+```{r}
+fit_one_simulation <- function(path, h, theta_start = theta_init,
+                               maxit = 1000) {
+  fit <- tryCatch(
+    minimize_theta(path, h = h, theta_start = theta_start, maxit = maxit),
+    error = function(e) NULL
+  )
+
+  if (is.null(fit)) {
+    return(list(
+      theta_hat = rep(NA_real_, length(theta_start)),
+      minimum = NA_real_,
+      loglikelihood = NA_real_,
+      converged = FALSE,
+      convergence = NA_integer_,
+      theta_valid = FALSE,
+      failed = TRUE
+    ))
+  }
+
+  failed <- !isTRUE(fit$converged) ||
+    !isTRUE(fit$theta_valid) ||
+    any(!is.finite(fit$theta_hat))
+
+  list(
+    theta_hat = fit$theta_hat,
+    minimum = fit$minimum,
+    loglikelihood = fit$loglikelihood,
+    converged = fit$converged,
+    convergence = fit$convergence,
+    theta_valid = fit$theta_valid,
+    function_evaluations = fit$function_evaluations,
+    failed = failed
+  )
+}
+
+run_student_kramers_study <- function(n_sim = 20,
+                                      h_values = c(0.01, 0.02),
+                                      T = 50,
+                                      h_sim = 0.0001,
+                                      theta_true = theta_0,
+                                      theta_start = theta_init,
+                                      maxit = 1000,
+                                      seed = 1) {
+  set.seed(seed)
+  results <- vector("list", n_sim * length(h_values))
+  row_id <- 1
+
+  for (sim_id in seq_len(n_sim)) {
+    full_path <- simulate_student_kramers(
+      theta = theta_true,
+      T = T,
+      h_sim = h_sim
+    )
+
+    for (h in h_values) {
+      observed_path <- subsample_path(full_path, h = h, h_sim = h_sim)
+      fit <- fit_one_simulation(
+        path = observed_path,
+        h = h,
+        theta_start = theta_start,
+        maxit = maxit
+      )
+
+      results[[row_id]] <- data.frame(
+        sim_id = sim_id,
+        h = h,
+        parameter = parameter_names,
+        theta_true = unname(theta_true),
+        theta_hat = unname(fit$theta_hat),
+        normalized_error = unname((fit$theta_hat - theta_true) / theta_true),
+        minimum = fit$minimum,
+        loglikelihood = fit$loglikelihood,
+        converged = fit$converged,
+        convergence = fit$convergence,
+        theta_valid = fit$theta_valid,
+        function_evaluations = unname(fit$function_evaluations),
+        failed = fit$failed
+      )
+
+      row_id <- row_id + 1
+    }
+  }
+
+  bind_rows(results)
+}
+
+summarise_simulation_failures <- function(sim_results) {
+  sim_results %>%
+    distinct(sim_id, h, failed, converged, theta_valid, convergence) %>%
+    group_by(h) %>%
+    summarise(
+      simulations = n(),
+      failed = sum(failed),
+      converged = sum(converged),
+      valid_theta = sum(theta_valid),
+      failure_rate = failed / simulations,
+      .groups = "drop"
+    )
+}
+```
+
+### Run simulations
+```{r, eval=FALSE}
+student_kramers_results <- run_student_kramers_study(
+  n_sim = 1000,
+  h_values = c(0.01, 0.02),
+  T = 50,
+  h_sim = 0.0001,
+  theta_true = theta_0,
+  theta_start = theta_init,
+  maxit = 1000,
+  seed = 1
+)
+
+failure_summary <- summarise_simulation_failures(student_kramers_results)
+failure_summary
+```
+
+### Figure 4 style plot
+```{r, eval=FALSE}
+plot_data <- student_kramers_results %>%
+  filter(!failed)
+
+ggplot(plot_data, aes(x = normalized_error)) +
+  geom_density(fill = "steelblue", alpha = 0.35, color = "steelblue4") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_grid(h ~ parameter, scales = "free_y") +
+  labs(
+    x = expression((hat(theta)[N] - theta[0]) / theta[0]),
+    y = "Density"
+  ) +
+  theme_bw()
+```

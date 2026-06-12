@@ -1,0 +1,626 @@
+---
+title: "Project in Statistics - Stochastic Differential Equations"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Packages
+```{r, message=FALSE}
+library(curl)
+library(tidyverse)
+library(zoo)
+library(expm)
+```
+
+
+# SDE
+
+## Data
+```{r, include=FALSE}
+excel_url <- "https://www.iceandclimate.nbi.ku.dk/data/GICC05modelext_GRIP_and_GISP2_and_resampled_data_series_Seierstad_et_al._2014_version_10Dec2014-2.xlsx"
+
+data_file <- file.path("/Users/valdemarcronfeldschaaf/Desktop/Matematik/Kandidat/25:26/Blok 4/Project in Statistics", "Ca2data.csv")
+
+res <- httr::GET(excel_url)
+excel_file <- tempfile(fileext = ".xlsx")
+writeBin(httr::content(res, as = "raw"), excel_file)
+Ca2data <- readxl::read_excel(excel_file, sheet = 3,
+range = "A51:I12278") %>%
+dplyr::slice(-1) %>%
+dplyr::select(1, ncol(.) - 1, ncol(.)) %>%
+dplyr::mutate_all(as.numeric) %>%
+dplyr::rename(age = 1, d18O = 2, Ca2 = 3)
+unlink(excel_file)
+readr::write_csv(Ca2data, data_file)
+```
+
+```{r}
+head(Ca2data)
+```
+### ... data
+```{r}
+Ca2_final <- Ca2data %>%
+  select(-d18O) %>%
+  filter(age >= 30000, age <= 80000) %>%
+  mutate(Ca2 = na.approx(Ca2)) %>%
+  group_by(age) %>%
+  summarise(Ca2 = mean(Ca2), .groups = "drop") %>%
+  mutate(Ca2 = -log(Ca2)) %>%
+  mutate(X = Ca2 - mean(Ca2)) %>%
+  select(-Ca2) %>%
+  mutate(age = age/1000) %>%
+  mutate(V = (lead(X) - X)/0.02) %>% 
+  arrange(desc(age))
+
+head(Ca2_final)
+```
+
+```{r}
+ggplot(Ca2_final, aes(x = age, y = X)) +
+  geom_line(color = "black") +
+  scale_x_reverse() +
+  labs(title = "Plot of Data",
+       x = "Age (kyr BP)", 
+       y = "X_t") +
+  theme_minimal()
+```
+
+
+## Implementing our functions
+
+Our functions should depend on data and theta, with theta being
+
+\begin{align*}
+\theta=(\eta,a,b,c,d,\alpha,\beta,\gamma)
+\end{align*}
+
+\begin{align*}
+\eta &\geq 0 \\
+a &< 0 \\
+\beta^2 &< 4 \alpha \gamma \\
+0 < \alpha &< 2 \eta
+\end{align*}
+
+
+### theta
+```{r}
+# theta = (eta,a,b,c,d,alpha,beta,gamma)
+theta <- c(1,2,3,4,5,6,7,8)
+theta_test <- c(67, -171, 3, 340, 31, 86, 27, 434)
+theta_test2 <- c(25, -171, 3, 340, 31,  36, 28, 430)
+theta_test3 <- c(50, -200, 10, 100, 10,  30, 5, 1000)
+# eta >= 0
+# a < 0
+# beta^2 < 4*alpha*gamma
+# 0 < alpha < 2*eta
+
+```
+
+### Python SS pseudo log-likelihood translated to R
+This is a direct R translation of the Python function `SS_neg_log_lik` from
+`student_kramers/likelihoods.py`. The Python function returns a negative
+log-likelihood, so `SS_loglikelihood_R()` below changes the sign to match the
+convention used in `pseudo_loglikelihood()` above.
+
+```{r}
+SS_precompute_matrices_R <- function(theta, drift_const, h) {
+  eta <- theta[1]
+  alpha <- theta[6]
+  beta <- theta[7]
+  gamma <- theta[8]
+
+  A_ss <- matrix(c(0, drift_const,
+                   1, -eta),
+                 nrow = 2, ncol = 2)
+  I2 <- diag(2)
+  A_kron <- kronecker(A_ss, I2) + kronecker(I2, A_ss)
+
+  alpha_mat <- matrix(0, nrow = 4, ncol = 4)
+  alpha_mat[4, 4] <- alpha
+
+  block_exp <- function(TL, TR, BR) {
+    n <- nrow(TL)
+    P <- matrix(0, nrow = 2 * n, ncol = 2 * n)
+    P[1:n, 1:n] <- TL
+    P[1:n, (n + 1):(2 * n)] <- TR
+    P[(n + 1):(2 * n), (n + 1):(2 * n)] <- BR
+    expm(h * P)[1:n, (n + 1):(2 * n), drop = FALSE]
+  }
+
+  I1 <- block_exp(A_kron + alpha_mat, alpha_mat, A_kron)
+  I3 <- block_exp(
+    A_kron + alpha_mat,
+    alpha_mat,
+    kronecker(A_ss, I2) + diag(4)
+  )
+  I5 <- block_exp(A_kron + alpha_mat, diag(4), matrix(0, 4, 4))
+  I5_G5 <- as.numeric(I5 %*% c(0, 0, 0, gamma))
+
+  P4 <- matrix(0, nrow = 6, ncol = 6)
+  P4[1:4, 1:4] <- A_kron + alpha_mat
+  P4[4, 6] <- beta
+  P4[5:6, 5:6] <- A_ss
+  I4 <- expm(h * P4)[1:4, 5:6, drop = FALSE]
+
+  list(
+    A = A_ss,
+    exp_Ah = expm(h * A_ss),
+    I1 = I1,
+    I3 = I3,
+    I4 = I4,
+    I5_G5 = I5_G5
+  )
+}
+
+SS_step_omega_R <- function(Y_mid, kappa, mats) {
+  x0 <- Y_mid[1] - kappa
+  x1 <- Y_mid[2]
+
+  x_outer <- c(x0 * x0, x0 * x1, x1 * x0, x1 * x1)
+  xxs <- c(x0 * kappa, 0, x1 * kappa, 0)
+
+  omega_vec <- as.numeric(
+    mats$I1 %*% x_outer +
+      2 * (mats$I3 %*% xxs) +
+      mats$I4 %*% c(x0, x1) +
+      mats$I5_G5
+  )
+
+  matrix(omega_vec, nrow = 2, ncol = 2, byrow = TRUE)
+}
+
+SS_f_step_R <- function(Y, h_step, theta, drift_const, kappa) {
+  a <- theta[2]
+  b <- theta[3]
+  c <- theta[4]
+  d <- theta[5]
+
+  X <- Y[1]
+  V <- Y[2]
+
+  c(
+    X,
+    V + h_step * (a * X^3 + b * X^2 + c * X + d -
+                    drift_const * (X - kappa))
+  )
+}
+
+SS_step_R <- function(Y_old, Y_new, h, theta, drift_const,
+                      kappa_pos, kappa_neg, mats) {
+  kappa <- if (Y_old[1] > 0) kappa_pos else kappa_neg
+
+  f_new <- SS_f_step_R(Y_new, -h / 2, theta, drift_const, kappa)
+  Y_mid <- SS_f_step_R(Y_old,  h / 2, theta, drift_const, kappa)
+
+  center <- c(kappa, 0)
+  mu <- as.numeric(mats$exp_Ah %*% (Y_mid - center) + center)
+  z <- f_new - mu
+
+  Omega <- SS_step_omega_R(Y_mid, kappa, mats)
+  omega11 <- Omega[1, 1]
+  omega12 <- Omega[1, 2]
+  omega21 <- Omega[2, 1]
+  omega22 <- Omega[2, 2]
+
+  det_omega <- max(omega11 * omega22 - omega12 * omega21, 1e-8)
+  quadratic <- (
+    omega22 * z[1]^2 -
+      (omega12 + omega21) * z[1] * z[2] +
+      omega11 * z[2]^2
+  ) / det_omega
+
+  0.5 * (log(det_omega) + quadratic)
+}
+
+SS_neg_log_lik_R <- function(theta, data, h) {
+  X <- as.matrix(data[, c("X", "V")])
+  X <- X[complete.cases(X), , drop = FALSE]
+
+  if (nrow(X) < 2) {
+    stop("Need at least two complete observations.")
+  }
+
+  data_old <- X[-nrow(X), , drop = FALSE]
+  data_new <- X[-1, , drop = FALSE]
+
+  a <- theta[2]
+  b <- theta[3]
+  c <- theta[4]
+
+  m <- mean(data_old[, 1])
+  m2 <- mean(data_old[, 1]^2)
+  var_x <- var(data_old[, 1])
+
+  drift_const <- 3 * a * m2 + 2 * b * m + c
+  root <- sqrt(max((3 * a * m + b)^2 + 9 * a^2 * var_x, 0))
+  kappa_pos <- (-b - root) / (3 * a)
+  kappa_neg <- (-b + root) / (3 * a)
+
+  mats <- SS_precompute_matrices_R(theta, drift_const, h)
+
+  nlls <- vapply(
+    seq_len(nrow(data_old)),
+    function(i) {
+      SS_step_R(
+        Y_old = data_old[i, ],
+        Y_new = data_new[i, ],
+        h = h,
+        theta = theta,
+        drift_const = drift_const,
+        kappa_pos = kappa_pos,
+        kappa_neg = kappa_neg,
+        mats = mats
+      )
+    },
+    numeric(1)
+  )
+
+  sum(nlls)
+}
+
+SS_loglikelihood_R <- function(data, h, theta) {
+  -SS_neg_log_lik_R(theta = theta, data = data, h = h)
+}
+
+# Same sign convention as pseudo_loglikelihood():
+SS_loglikelihood_R(Ca2_final, h = 0.02, theta_test)
+```
+
+### Python SS optimizer translated to R
+This mirrors the repository's `run_estimator_lbfgs()` workflow: build a loss
+function from the SS negative log-likelihood, minimize it, and return the
+estimated parameter vector.
+
+```{r}
+run_estimator_lbfgs_R <- function(params_init, loss_fn,
+                                  maxiter = 1000, tol = 1e-5,
+                                  verbose = TRUE) {
+  objective <- function(params) {
+    value <- tryCatch(
+      loss_fn(params),
+      error = function(e) Inf,
+      warning = function(w) suppressWarnings(loss_fn(params))
+    )
+
+    if (!is.finite(value)) {
+      return(1e100)
+    }
+
+    value
+  }
+
+  fit <- optim(
+    par = params_init,
+    fn = objective,
+    method = "L-BFGS-B",
+    control = list(
+      maxit = maxiter,
+      pgtol = tol,
+      parscale = pmax(abs(params_init), 1),
+      trace = if (verbose) 1 else 0
+    )
+  )
+
+  if (verbose) {
+    cat("--- L-BFGS-B ---\n")
+    cat("  final NLL:", fit$value, "\n")
+    cat("  convergence:", fit$convergence, "\n")
+  }
+
+  list(
+    params_hat = fit$par,
+    final_loss = fit$value,
+    convergence = fit$convergence,
+    converged = fit$convergence == 0,
+    message = fit$message,
+    counts = fit$counts,
+    optim = fit
+  )
+}
+
+make_SS_loss_fn_R <- function(data, h) {
+  function(theta) {
+    SS_neg_log_lik_R(theta = theta, data = data, h = h)
+  }
+}
+
+estimate_SS_theta_R <- function(data, h, theta_start,
+                                maxiter = 1000, tol = 1e-5,
+                                verbose = TRUE) {
+  loss_fn <- make_SS_loss_fn_R(data, h)
+  fit <- run_estimator_lbfgs_R(
+    params_init = theta_start,
+    loss_fn = loss_fn,
+    maxiter = maxiter,
+    tol = tol,
+    verbose = verbose
+  )
+
+  names(fit$params_hat) <- c("eta", "a", "b", "c", "d", "alpha", "beta", "gamma")
+  fit$loglikelihood <- -fit$final_loss
+  fit
+}
+
+SS_theta_checks_R <- function(theta) {
+  eta <- theta[1]
+  a <- theta[2]
+  alpha <- theta[6]
+  beta <- theta[7]
+  gamma <- theta[8]
+
+  data.frame(
+    condition = c(
+      "all finite",
+      "eta > 0",
+      "a < 0",
+      "alpha > 0",
+      "alpha < 2 * eta",
+      "beta^2 < 4 * alpha * gamma"
+    ),
+    value = c(
+      all(is.finite(theta)),
+      eta,
+      a,
+      alpha,
+      alpha - 2 * eta,
+      beta^2 - 4 * alpha * gamma
+    ),
+    ok = c(
+      all(is.finite(theta)),
+      eta > 0,
+      a < 0,
+      alpha > 0,
+      alpha < 2 * eta,
+      beta^2 < 4 * alpha * gamma
+    )
+  )
+}
+
+# Example:
+fit_SS <- estimate_SS_theta_R(Ca2_final, h = 0.02, theta_start = theta_test)
+fit_SS$params_hat
+fit_SS$loglikelihood
+SS_theta_checks_R(fit_SS$params_hat)
+```
+
+### Simulate
+```{r}
+simulation_M <- function(N, h, theta, start = c(1.5,0), seed = 67) {
+  
+  eta <- theta[1]
+  a <- theta[2]
+  b <- theta[3]
+  c <- theta[4]
+  d <- theta[5]
+  alpha <- theta[6]
+  beta <- theta[7]
+  gamma <- theta[8]
+  
+  X <- numeric(N)
+  V <- numeric(N)
+  
+  X[1] <- start[1]
+  V[1] <- start[2]
+  W <- rnorm(N, 0, sqrt(h))
+  for (i in 2:N) {
+    X[i] <- X[i-1] + h * V[i-1]
+    V[i] <- V[i-1] + h * (-eta * V[i-1] + a * X[i-1]^3 + b * X[i-1]^2 + c * X[i-1] + d) +
+      sqrt(alpha * V[i-1]^2 + beta * V[i-1] + gamma) * W[i] + 0.5 * (alpha * V[i-1] + beta / 2) * (W[i]^2 - h)
+  }
+  return(data.frame(
+    time = seq(0, by = h, length.out = N),
+    X = X,
+    V = V
+  ))
+}
+```
+
+```{r}
+sim_M <- simulation_M(
+  N = 1000000,
+  h = 0.0001,
+  theta = c(30, -125, 40, 150, -20, 20, -8, 1280.8),
+  start = c(1.5,0),
+  seed = 67
+)
+sim_M
+plot(sim_M$time, sim_M$X, type = "l", xlab = "time", ylab = "X")
+plot(sim_M$time, sim_M$V, type = "l", xlab = "time", ylab = "V")
+```
+```{r}
+theta0 <- c(
+  eta   = 30,
+  a     = -125,
+  b     = 40,
+  c     = 150,
+  d     = -20,
+  alpha = 20,
+  beta  = -8,
+  gamma = 1280
+)
+
+T <- 10
+h <- 0.001
+N <- T / h + 1
+
+n_sims <- 200
+
+sim_list <- lapply(1:n_sims, function(j) {
+  dat <- simulation_M(
+    N = N,
+    h = h,
+    theta = theta0,
+    start = c(1.5, 0),
+    seed = 67 + j
+  )
+
+  dat$dataset <- j
+  dat
+})
+
+sim_data <- do.call(rbind, sim_list)
+sim_data
+```
+
+```{r}
+sim_data_1 <- sim_data %>%
+  filter(dataset == 1) %>%
+  select(time, X, V)
+
+SS_neg_log_lik_R(theta = theta0, data = sim_data_1, h = h)
+SS_loglikelihood_R(data = sim_data_1, h = h, theta = theta0)
+
+fit_sim_data_1 <- estimate_SS_theta_R(
+  data = sim_data_1,
+  h = h,
+  theta_start = theta_test3,
+  maxiter = 100,
+  verbose = TRUE
+)
+
+fit_sim_data_1$params_hat
+fit_sim_data_1$final_loss
+fit_sim_data_1$loglikelihood
+SS_theta_checks_R(fit_sim_data_1$params_hat)
+```
+
+```{r}
+datasets <- split(sim_data, sim_data$dataset)
+```
+
+
+```{r}
+estimate_one_dataset_SS <- function(dataset_id, data_i, h, theta_start,
+                                    theta_true, maxiter = 100) {
+  data_i <- data_i %>%
+    select(time, X, V)
+
+  fit_i <- tryCatch(
+    estimate_SS_theta_R(
+      data = data_i,
+      h = h,
+      theta_start = theta_start,
+      maxiter = maxiter,
+      verbose = FALSE
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(fit_i)) {
+    return(data.frame(
+      dataset = dataset_id,
+      parameter = names(theta_true),
+      theta_true = as.numeric(theta_true),
+      theta_hat = NA_real_,
+      relative_error = NA_real_,
+      final_loss = NA_real_,
+      loglikelihood = NA_real_,
+      converged = FALSE,
+      theta_valid = FALSE,
+      failed = TRUE
+    ))
+  }
+
+  checks_i <- SS_theta_checks_R(fit_i$params_hat)
+  theta_valid_i <- all(checks_i$ok)
+
+  data.frame(
+    dataset = dataset_id,
+    parameter = names(theta_true),
+    theta_true = as.numeric(theta_true),
+    theta_hat = as.numeric(fit_i$params_hat),
+    relative_error = (as.numeric(fit_i$params_hat) - as.numeric(theta_true)) /
+      as.numeric(theta_true),
+    final_loss = fit_i$final_loss,
+    loglikelihood = fit_i$loglikelihood,
+    converged = fit_i$converged,
+    theta_valid = theta_valid_i,
+    failed = !isTRUE(fit_i$converged) ||
+      !theta_valid_i ||
+      any(!is.finite(fit_i$params_hat))
+  )
+}
+
+estimate_all_datasets_SS <- function(sim_data, h, theta_start, theta_true,
+                                     maxiter = 100) {
+  datasets <- split(sim_data, sim_data$dataset)
+
+  fits <- lapply(seq_along(datasets), function(i) {
+    estimate_one_dataset_SS(
+      dataset_id = as.integer(names(datasets)[i]),
+      data_i = datasets[[i]],
+      h = h,
+      theta_start = theta_start,
+      theta_true = theta_true,
+      maxiter = maxiter
+    )
+  })
+
+  bind_rows(fits)
+}
+
+params_SS <- estimate_all_datasets_SS(
+  sim_data = sim_data,
+  h = h,
+  theta_start = theta_test3,
+  theta_true = theta0,
+  maxiter = 100
+)
+
+params_SS
+```
+
+```{r}
+params_SS_summary <- params_SS %>%
+  group_by(parameter) %>%
+  summarise(
+    n_datasets = n_distinct(dataset),
+    n_failed = sum(failed),
+    mean_theta_hat = mean(theta_hat, na.rm = TRUE),
+    median_theta_hat = median(theta_hat, na.rm = TRUE),
+    mean_relative_error = mean(relative_error, na.rm = TRUE),
+    sd_relative_error = sd(relative_error, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+params_SS_summary
+```
+```{r}
+readr::write_csv(params_SS, "params_SS.csv")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

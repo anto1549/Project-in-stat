@@ -40,8 +40,7 @@ Ca2_final <- Ca2data %>%
   mutate(X = Ca2 - mean(Ca2)) %>%
   select(-Ca2) %>%
   mutate(age = age/1000) %>%
-  mutate(V = (lead(X) - X)/0.02) %>%
-  arrange(desc(age))
+  mutate(V = (lead(X) - X)/0.02)
 Ca2_final
 ```
 #Plot af data
@@ -61,14 +60,14 @@ ggplot(Ca2_final, aes(x = age, y = X)) +
 library(expm)
 h <- 0.02
 #theta=c(eta,a,b,c,d,alpha,beta,gamma)
-theta <- c(1,2,3,4,5,6,7,8) #Data from page 2 on Predrags paper
+theta <- c(1,2,3,4,5,6,7,8) #Data fra side 2 fra Predrags papir
 A <- function(theta) {
   result <- matrix(data=c(0,theta[4],1,-theta[1]), nrow = 2,ncol = 2)
   return(result)
 }
 A(theta)
 b <- function(theta) {
-  result <- rbind(-theta[5]/theta[4],0) #Opmærksom på c\neq0
+  result <- c(-theta[5]/theta[4],0) #Opmærksom på c\neq0
   return(result)
 }
 b(theta)
@@ -79,10 +78,10 @@ mu_h <- function(x, h, theta) {
   return(result)
 }
 f <- function(x, h, theta) {
-  result <- rbind(x[1],x[2]+h*(theta[2]*x[1]^3+theta[3]*x[1]^2))
+  result <- c(x[1],x[2]+h*(theta[2]*x[1]^3+theta[3]*x[1]^2))
   return(result)
 }
-
+mu_h(c(Ca2_final$X[1],Ca2_final$V[1]),h,theta)
 ```
 
 
@@ -95,10 +94,10 @@ M1 <- function(theta) {
   alpha_mat <- matrix(0,4,4)
   alpha_mat[4,4] <- theta[6]
   A_mat <- A(theta)
-  A_kron <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat) 
+  A <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat) 
   M <- rbind(
-    cbind(A_kron + alpha_mat, alpha_mat),
-    cbind(matrix(0,4,4), A_kron)
+    cbind(A + alpha_mat, alpha_mat),
+    cbind(matrix(0,4,4), A)
   )
   return(M)
 }
@@ -107,9 +106,9 @@ M2 <- function(theta) {
   alpha_mat <- matrix(0,4,4)
   alpha_mat[4,4] <- theta[6]
   A_mat <- A(theta)
-  A_kron <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat)
+  A <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat)
   M <- rbind(
-    cbind(A_kron + alpha_mat, alpha_mat),
+    cbind(A + alpha_mat, alpha_mat),
     cbind(matrix(0,4,4), kronecker(diag(2),(diag(2) + A_mat)))
   )
   return(M)
@@ -119,9 +118,9 @@ M3 <- function(theta) {
   alpha_mat <- matrix(0,4,4)
   alpha_mat[4,4] <- theta[6]
   A_mat <- A(theta)
-  A_kron <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat)
+  A <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat)
   M <- rbind(
-    cbind(A_kron + alpha_mat, alpha_mat),
+    cbind(A + alpha_mat, alpha_mat),
     cbind(matrix(0,4,4), kronecker((A_mat + diag(2)),diag(2)))
   )
   return(M)
@@ -133,9 +132,9 @@ M4 <- function(theta) {
   A_mat <- A(theta)
   beta_mat <- matrix(0,nrow = 4,ncol = 2)
   beta_mat[4,2] <- theta[7]
-  A_kron <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat)
+  A <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat)
   M <- rbind(
-    cbind(A_kron + alpha_mat, beta_mat),
+    cbind(A + alpha_mat, beta_mat),
     cbind(matrix(0,nrow = 2,ncol = 4), A_mat)
   )
   return(M)
@@ -145,9 +144,9 @@ M5 <- function(theta) {
   alpha_mat <- matrix(0,4,4)
   alpha_mat[4,4] <- theta[6]
   A_mat <- A(theta)
-  A_kron <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat)
+  A <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat)
   M <- rbind(
-    cbind(A_kron + alpha_mat, diag(4)),
+    cbind(A + alpha_mat, diag(4)),
     cbind(matrix(0,4,4), matrix(0,4,4))
   )
   return(M)
@@ -181,24 +180,21 @@ I5 <- function(theta,h) {
   return(M5_mat[1:4,5:8])
 }
 I1(theta,h)
-I2(c(67.9, -97.8, 8.4, 66.2, -9.1, 64.4, 228.0, 4371.0),h)
-I3(c(67.9, -97.8, 8.4, 66.2, -9.1, 64.4, 228.0, 4371.0),h)
+I1(c(67.9, -97.8, 8.4, 66.2, -9.1, 64.4, 228.0, 4371.0),h)
 ```
 
 
 
 #Omega
 ```{r}
-#I5compute = I5(theta,h) %*% c(0,0,0,theta[8])
-
-Omega <- function(x,theta,h) { #, I5compute, A_kron
+Omega <- function(x,theta,h) {
   B <- b(theta)
   
   result <- I1(theta,h) %*% as.vector( (x-B) %*% t(x-B) ) + 
     I2(theta,h) %*% as.vector( (x-B) %*% t(B) ) +
     I3(theta,h) %*% as.vector( B %*% t(x-B) ) +
     I4(theta,h) %*% (x-B) +
-    I5(theta,h) %*% c(0,0,0,theta[8]) #I5compute
+    I5(theta,h) %*% c(0,0,0,theta[8])
   result <- matrix(result, nrow = sqrt(length(result))) # Unvectorize
   return(result)
 }
@@ -220,7 +216,14 @@ loglik <- function(theta, h, S) {
   }
   
   nll <- 0 #Negative loglikelihood
-  A_kron <- kronecker(A_mat,diag(2)) + kronecker(diag(2),A_mat)
+  
+  
+  #Now we test what is wrong
+  #Z <- vector("list",(length(S[,1])-3)) #Vector
+  #f_inv <- vector("list",(length(S[,1])-3)) #Vector
+  #mu <- vector("list",(length(S[,1])-3)) #Vector
+  #omega <- vector("list",(length(S[,1])-3)) #Matrix
+  #omega34 <- vector("list", (length(S[,1])-3)) #Matrix
   
   Z_tk = matrix(0, length(S[,1]), 2)
   
@@ -242,33 +245,23 @@ loglik <- function(theta, h, S) {
     nll <- nll + (4/3) * logdet_omega_34h + t(Z_tk[i,])%*%solve(omega_h)%*%Z_tk[i,]
     
     #nll <- nll + (2/3) * omega_23h[2,2] + (Z_tk[i,2]^2)/omega_h[2,2]
+
+    
+    #Z[i-1] <- Z_tk
+    #f_inv[i-1] <- f(curr_data, -h/2, theta)
+    #mu[i-1] <- mu_h(f(prev_data, h/2, theta), h, theta)
+    #omega[i-1] <- omega_h
+    #omega34[i-1] <- omega_34h
     
     
   }
   print(nll)
   return(nll)
-  #return()
+  #my_list <- list("nll" = nll, "Z" = Z, "f_inv" = f_inv, "mu" = mu, "omega" = omega, "omega34" = omega34)
 }
-#theta_test
+theta_test
 
 loglik(theta_test, h, cbind(Ca2_final$X, Ca2_final$V))
-```
-
-#Things that may be useful to test that is wrong with the code
-```{r}
-  #Now we test what is wrong
-  #Z <- vector("list",(length(S[,1])-3)) #Vector
-  #f_inv <- vector("list",(length(S[,1])-3)) #Vector
-  #mu <- vector("list",(length(S[,1])-3)) #Vector
-  #omega <- vector("list",(length(S[,1])-3)) #Matrix
-  #omega34 <- vector("list", (length(S[,1])-3)) #Matrix
-
-  #Z[i-1] <- Z_tk
-  #f_inv[i-1] <- f(curr_data, -h/2, theta)
-  #mu[i-1] <- mu_h(f(prev_data, h/2, theta), h, theta)
-  #omega[i-1] <- omega_h
-  #omega34[i-1] <- omega_34h
-
 #plot(Z[,1], type = "l")
 #nll$nll
 #nll$Z
@@ -289,9 +282,16 @@ loglik(theta_test, h, cbind(Ca2_final$X, Ca2_final$V))
 
 
 
+
 ```{r}
 matrix(0, length(S[,1]), 2)
       
+```
+
+
+
+```{r}
+I1(theta_init,h)
 ```
 
 
@@ -313,26 +313,6 @@ result_lbfgsb <- optim(
     factr = 1e2,
     maxit = 5000,
     trace = 1
-  )
-)
-
-result_lbfgsb
-print(result_lbfgsb)
-```
-
-```{r}
-theta_init <- c(50, -200, 10, 100, 10, 30, -5, 1000)
-S <- cbind(Ca2_final$X, Ca2_final$V)
-h <- 0.02
-
-result_lbfgsb <- optim(
-  par = theta_init,
-  fn = loglik,
-  S = S,
-  h = h,
-  method = "L-BFGS-B",
-  control = list(
-    factr = 1e8
   )
 )
 
@@ -383,395 +363,6 @@ result_lbfgsb <- optim(
 
 result_lbfgsb
 print(result_lbfgsb)
-```
-
-
-#To simulate you onw study, use Euler-Maruyama estimtor
-```{r}
-simulation <- function(N, h, theta, start = c(1.5,0), seed = 67) {
-  
-  eta <- theta[1]
-  a <- theta[2]
-  b <- theta[3]
-  c <- theta[4]
-  d <- theta[5]
-  alpha <- theta[6]
-  beta <- theta[7]
-  gamma <- theta[8]
-  
-  X <- numeric(N)
-  V <- numeric(N)
-  
-  X[1] <- start[1]
-  V[1] <- start[2]
-  W <- rnorm(N, 0, sqrt(h))
-  for (i in 2:N) {
-    X[i] <- X[i-1] + h * V[i-1]
-    V[i] <- V[i-1] + h * (-eta * V[i-1] + a * X[i-1]^3 + b * X[i-1]^2 + c * X[i-1] + d) +
-      sqrt(alpha * V[i-1]^2 + beta * V[i-1] + gamma) * W[i] #+ 0.5 * (alpha * V[i-1] + beta / 2) * (W[i]^2 - h) - Milstein correction
-  }
-  return(data.frame(
-    time = seq(0, by = h, length.out = N),
-    X = X,
-    V = V
-  ))
-}
-```
-
-#test
-```{r}
-sim_EM <- simulation(
-  N = 50000,
-  h = 0.001,
-  theta = c(30, -125, 40, 150, -20, 20, -8, 1280.8),
-  start = c(1.5,0),
-  seed = 67
-)
-sim_EM
-
-sim_EM2 <- sim_EM[seq(1, 50000, 20),]
-plot(sim_EM$time[1:4000], sim_EM$X[1:4000], type = "l", xlab = "time", ylab = "X")
-
-plot(sim_EM2$time[1:200], sim_EM2$X[1:200], type = "l", xlab = "time", ylab = "X")
-
-plot(sim_EM$time, sim_EM$V, type = "l", xlab = "time", ylab = "V")
-```
-
-```{r}
-est_trial = estimate_SS_theta_R(sim_EM2, h = 0.02, theta_start = theta0)
-est_trial
-```
-
-
-#Simulation study with Milstein correction 
-```{r}
-simulation_M <- function(N, h, theta, start = c(1.5,0), seed = 67) {
-  
-  eta <- theta[1]
-  a <- theta[2]
-  b <- theta[3]
-  c <- theta[4]
-  d <- theta[5]
-  alpha <- theta[6]
-  beta <- theta[7]
-  gamma <- theta[8]
-  
-  X <- numeric(N)
-  V <- numeric(N)
-  
-  X[1] <- start[1]
-  V[1] <- start[2]
-  W <- rnorm(N, 0, sqrt(h))
-  for (i in 2:N) {
-    X[i] <- X[i-1] + h * V[i-1]
-    V[i] <- V[i-1] + h * (-eta * V[i-1] + a * X[i-1]^3 + b * X[i-1]^2 + c * X[i-1] + d) +
-      sqrt(alpha * V[i-1]^2 + beta * V[i-1] + gamma) * W[i] + 0.5 * (alpha * V[i-1] + beta / 2) * (W[i]^2 - h)
-  }
-  return(data.frame(
-    time = seq(0, by = h, length.out = N),
-    X = X,
-    V = V
-  ))
-}
-```
-
-#test
-```{r}
-sim_M <- simulation_M(
-  N = 50000,
-  h = 0.001,
-  theta = c(30, -125, 40, 150, -20, 20, -8, 1280.8),
-  start = c(1.5,0),
-  seed = 67
-)
-sim_M
-plot(sim_M$time, sim_M$X, type = "l", xlab = "time", ylab = "X")
-plot(sim_M$time, sim_M$V, type = "l", xlab = "time", ylab = "V")
-```
-
-#1000 data sets
-```{r}
-theta0 <- c(
-  eta   = 30,
-  a     = -125,
-  b     = 40,
-  c     = 150,
-  d     = -20,
-  alpha = 20,
-  beta  = -8,
-  gamma = 1280
-)
-
-T <- 10
-h <- 0.001
-N <- T / h + 1
-
-n_sims <- 200
-
-sim_list <- lapply(1:n_sims, function(j) {
-  dat <- simulation_M(
-    N = N,
-    h = h,
-    theta = theta0,
-    start = c(1.5, 0),
-    seed = 67 + j
-  )
-
-  dat$dataset <- j
-  dat
-})
-
-sim_data <- do.call(rbind, sim_list)
-sim_data
-```
-
-```{r}
-datasets <- split(sim_data, sim_data$dataset)
-datasets[[1]]
-```
-#Test for the first dataset
-```{r}
-fit_SS <- estimate_SS_theta_R(datasets[[1]], h = 0.001, theta_start = theta0)
-fit_SS$params_hat
-```
-
-#Now all at the same time
-```{r}
-fits_all <- lapply(datasets, function(dat_i) {
-  estimate_SS_theta_R(
-    dat_i,
-    h = 0.001,
-    theta_start = theta_test
-  )
-})
-params_all <- do.call(rbind, lapply(seq_along(fits_all), function(i) {
-  data.frame(
-    dataset = i,
-    t(fits_all[[i]]$params_hat)
-  )
-}))
-params_all
-```
-
-```{r}
-readr::write_csv(params_all)
-```
-
-
-#Histogram 
-```{r}
-hist(params_all$eta)
-hist(params_all$a)
-hist(params_all$b)
-hist(params_all$c)
-hist(params_all$d)
-hist(params_all$alpha)
-hist(params_all$beta)
-hist(params_all$gamma)
-```
-
-```{r}
-par(mfrow = c(1, 2))
-
-hist(params_all$eta,   main = "eta",   xlab = "eta")
-hist(params_all$a,     main = "a",     xlab = "a")
-hist(params_all$b,     main = "b",     xlab = "b")
-hist(params_all$c,     main = "c",     xlab = "c")
-
-par(mfrow = c(1, 1))
-```
-
-```{r}
-par(mfrow = c(1, 2))
-
-hist(params_all$d,     main = "d",     xlab = "d")
-hist(params_all$alpha, main = "alpha", xlab = "alpha")
-hist(params_all$beta,  main = "beta",  xlab = "beta")
-hist(params_all$gamma, main = "gamma", xlab = "gamma")
-
-par(mfrow = c(1, 1))
-```
-
-#simulation study with longer time period
-
-```{r}
-theta0 <- c(
-  eta   = 30,
-  a     = -125,
-  b     = 40,
-  c     = 150,
-  d     = -20,
-  alpha = 20,
-  beta  = -8,
-  gamma = 1280
-)
-
-n_sims <- 200
-
-sim_list <- lapply(1:n_sims, function(j) {
-  sim_M <- simulation_M(
-    N = 50000,
-    h = 0.001,
-    theta = theta0,
-    start = c(1.5, 0),
-    seed = 67 + j
-  )
-  
-  sim_M2 <- sim_M[seq(1, 50000, 20), ]
-  
-  sim_M2$dataset <- j
-
-  sim_M2
-})
-
-sim_data_new <- do.call(rbind, sim_list)
-sim_data_new
-```
-
-```{r}
-datasets_new <- split(sim_data_new, sim_data_new$dataset)
-datasets_new[[1]]
-```
-
-```{r}
-fits_all_new <- lapply(datasets_new, function(dat_i) {
-  estimate_SS_theta_R(
-    dat_i,
-    h = 0.001,
-    theta_start = theta_test
-  )
-})
-params_all_new <- do.call(rbind, lapply(seq_along(fits_all_new), function(i) {
-  data.frame(
-    dataset = i,
-    t(fits_all_new[[i]]$params_hat)
-  )
-}))
-params_all_new
-```
-
-```{r}
-fits_all_new <- lapply(datasets_new, function(dat_i) {
-  estimate_SS_theta_R(
-    dat_i,
-    h = 0.02,
-    theta_start = theta_test
-  )
-})
-params_all_new <- do.call(rbind, lapply(seq_along(fits_all_new), function(i) {
-  data.frame(
-    dataset = i,
-    t(fits_all_new[[i]]$params_hat)
-  )
-}))
-params_all_new
-```
-
-```{r}
-params_all_new
-```
-```{r}
-hist(params_all_new$eta)
-hist(params_all_new$a)
-hist(params_all_new$b)
-hist(params_all_new$c)
-hist(params_all_new$d)
-hist(params_all_new$alpha)
-hist(params_all_new$beta)
-hist(params_all_new$gamma)
-```
-
-```{r}
-par(mfrow = c(1, 2))
-
-hist(params_all_new$eta,   main = "eta",   xlab = "eta")
-abline(v = mean(params_all_new$eta), lty = 2, lwd = 2)
-abline(v = median(params_all_new$eta), lty = 3, lwd = 2)
-abline(v = 30, lty = 1, lwd = 2)   # true eta value
-
-legend("topleft",
-       legend = c("Mean", "Median", "True value"),
-       lty = c(2, 3, 1),
-       lwd = 2,
-       bty = "n")
-hist(params_all_new$a,     main = "a",     xlab = "a")
-abline(v = mean(params_all_new$a), lty = 2, lwd = 2)
-abline(v = median(params_all_new$a), lty = 3, lwd = 2)
-abline(v = -125, lty = 1, lwd = 2)   # true a value
-
-legend("topleft",
-       legend = c("Mean", "Median", "True value"),
-       lty = c(2, 3, 1),
-       lwd = 2,
-       bty = "n")
-hist(params_all_new$b,     main = "b",     xlab = "b")
-abline(v = mean(params_all_new$b), lty = 2, lwd = 2)
-abline(v = median(params_all_new$b), lty = 3, lwd = 2)
-abline(v = 40, lty = 1, lwd = 2)   # true b value
-
-legend("topleft",
-       legend = c("Mean", "Median", "True value"),
-       lty = c(2, 3, 1),
-       lwd = 2,
-       bty = "n")
-hist(params_all_new$c,     main = "c",     xlab = "c")
-abline(v = mean(params_all_new$c), lty = 2, lwd = 2)
-abline(v = median(params_all_new$c), lty = 3, lwd = 2)
-abline(v = 150, lty = 1, lwd = 2)   # true c value
-
-legend("topleft",
-       legend = c("Mean", "Median", "True value"),
-       lty = c(2, 3, 1),
-       lwd = 2,
-       bty = "n")
-
-par(mfrow = c(1, 1))
-```
-```{r}
-par(mfrow = c(1, 2))
-
-hist(params_all_new$d,     main = "d",     xlab = "d")
-abline(v = mean(params_all_new$d), lty = 2, lwd = 2)
-abline(v = median(params_all_new$d), lty = 3, lwd = 2)
-abline(v = -20, lty = 1, lwd = 2)   # true d value
-
-legend("topleft",
-       legend = c("Mean", "Median", "True value"),
-       lty = c(2, 3, 1),
-       lwd = 2,
-       bty = "n")
-hist(params_all_new$alpha, main = "alpha", xlab = "alpha")
-abline(v = mean(params_all_new$alpha), lty = 2, lwd = 2)
-abline(v = median(params_all_new$alpha), lty = 3, lwd = 2)
-abline(v = 20, lty = 1, lwd = 2)   # true alpha value
-
-legend("topleft",
-       legend = c("Mean", "Median", "True value"),
-       lty = c(2, 3, 1),
-       lwd = 2,
-       bty = "n")
-hist(params_all_new$beta,  main = "beta",  xlab = "beta")
-abline(v = mean(params_all_new$beta), lty = 2, lwd = 2)
-abline(v = median(params_all_new$beta), lty = 3, lwd = 2)
-abline(v = -8, lty = 1, lwd = 2)   # true beta value
-
-legend("topleft",
-       legend = c("Mean", "Median", "True value"),
-       lty = c(2, 3, 1),
-       lwd = 2,
-       bty = "n")
-hist(params_all_new$gamma, main = "gamma", xlab = "gamma")
-abline(v = mean(params_all_new$gamma), lty = 2, lwd = 2)
-abline(v = median(params_all_new$gamma), lty = 3, lwd = 2)
-abline(v = 1280, lty = 1, lwd = 2)   # true gamma value
-
-legend("topleft",
-       legend = c("Mean", "Median", "True value"),
-       lty = c(2, 3, 1),
-       lwd = 2,
-       bty = "n")
-
-par(mfrow = c(1, 1))
 ```
 
 

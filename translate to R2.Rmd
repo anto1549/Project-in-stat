@@ -1,0 +1,456 @@
+---
+title: "translate from python"
+output: html_document
+date: "2026-06-09"
+---
+
+```{r setup, include=FALSE}
+# install.packages("expm")
+library(expm)
+
+# ------------------------------------------------------------
+# Strang Splitting: precompute matrix-exponential integrals
+# ------------------------------------------------------------
+
+precompute_SS_matrices <- function(params, drift_const, h) {
+  # R indexing:
+  # params[1] = eta
+  # params[2] = a
+  # params[3] = b
+  # params[4] = c
+  # params[5] = d
+  # params[6] = alpha
+  # params[7] = beta
+  # params[8] = gamma
+  
+  A <- matrix(c(
+    0.0,          1.0,
+    drift_const, -params[1]
+  ), nrow = 2, byrow = TRUE)
+  
+  I2 <- diag(2)
+  Ak <- kronecker(A, I2) + kronecker(I2, A)
+  
+  al <- matrix(0, nrow = 4, ncol = 4)
+  al[4, 4] <- params[6]   # alpha
+  
+  eAh <- expm(h * A)
+  
+  block_integral <- function(TL, TR, BR, n = 8) {
+    P <- matrix(0, nrow = n, ncol = n)
+    s <- nrow(TL)
+    
+    P[1:s, 1:s] <- TL
+    P[1:s, (s + 1):n] <- TR
+    P[(s + 1):n, (s + 1):n] <- BR
+    
+    expP <- expm(h * P)
+    expP[1:s, (s + 1):n]
+  }
+  
+  I1 <- block_integral(Ak + al, al, Ak)
+  
+  I3 <- block_integral(
+    Ak + al,
+    al,
+    kronecker(A, I2) + diag(4)
+  )
+  
+  I5 <- block_integral(
+    Ak + al,
+    diag(4),
+    matrix(0, nrow = 4, ncol = 4)
+  )
+  
+  I5_G5 <- I5 %*% c(0, 0, 0, params[8])  # gamma
+  
+  P4 <- matrix(0, nrow = 6, ncol = 6)
+  P4[1:4, 1:4] <- Ak + al
+  P4[4, 6] <- params[7]                  # beta
+  P4[5:6, 5:6] <- A
+  
+  I4 <- expm(h * P4)[1:4, 5:6]
+  
+  list(
+    eAh = eAh,
+    I1 = I1,
+    I3 = I3,
+    I4 = I4,
+    I5_G5 = I5_G5
+  )
+}
+
+
+# ------------------------------------------------------------
+# Covariance Omega for one Strang Splitting transition
+# ------------------------------------------------------------
+
+step_Omega_SS <- function(Y_mid, kappa, I1, I3, I4, I5_G5) {
+  x0 <- Y_mid[1] - kappa
+  x1 <- Y_mid[2]
+  
+  x_out <- c(
+    x0 * x0,
+    x0 * x1,
+    x1 * x0,
+    x1 * x1
+  )
+  
+  xxs <- c(
+    x0 * kappa,
+    0,
+    x1 * kappa,
+    0
+  )
+  
+  Omega_vec <- I1 %*% x_out +
+    2 * (I3 %*% xxs) +
+    I4 %*% c(x0, x1) +
+    I5_G5
+  
+  matrix(Omega_vec, nrow = 2, ncol = 2, byrow = TRUE)
+}
+
+
+# ------------------------------------------------------------
+# Deterministic nonlinear half-step
+# ------------------------------------------------------------
+
+f_step_SS <- function(Y, h_step, params, drift_const, kappa) {
+  a <- params[2]
+  b <- params[3]
+  c_par <- params[4]
+  d <- params[5]
+  
+  X <- Y[1]
+  V <- Y[2]
+  
+  c(
+    X,
+    V + h_step * (
+      a * X^3 +
+        b * X^2 +
+        c_par * X +
+        d -
+        drift_const * (X - kappa)
+    )
+  )
+}
+
+
+# ------------------------------------------------------------
+# One transition contribution to the SS negative log-likelihood
+# ------------------------------------------------------------
+
+step_SS <- function(Y_old, Y_new, cond_val, h,
+                    params, drift_const,
+                    kappa_pos, kappa_neg, I_mats) {
+  
+  eAh <- I_mats$eAh
+  I1 <- I_mats$I1
+  I3 <- I_mats$I3
+  I4 <- I_mats$I4
+  I5_G5 <- I_mats$I5_G5
+  
+  kappa <- if (cond_val) kappa_pos else kappa_neg
+  
+  # Backward half-step from Y_new
+  f_new <- f_step_SS(
+    Y = Y_new,
+    h_step = -h / 2,
+    params = params,
+    drift_const = drift_const,
+    kappa = kappa
+  )
+  
+  # Forward half-step from Y_old
+  Y_mid <- f_step_SS(
+    Y = Y_old,
+    h_step = h / 2,
+    params = params,
+    drift_const = drift_const,
+    kappa = kappa
+  )
+  
+  xs <- c(kappa, 0)
+  
+  mu <- as.vector(eAh %*% (Y_mid - xs) + xs)
+  z <- f_new - mu
+  
+  Omega <- step_Omega_SS(
+    Y_mid = Y_mid,
+    kappa = kappa,
+    I1 = I1,
+    I3 = I3,
+    I4 = I4,
+    I5_G5 = I5_G5
+  )
+  
+  a11 <- Omega[1, 1]
+  a12 <- Omega[1, 2]
+  a21 <- Omega[2, 1]
+  a22 <- Omega[2, 2]
+  
+  det_val <- max(a11 * a22 - a12 * a21, 1e-8)
+  
+  quad_form <- (
+    a22 * z[1]^2 -
+      (a12 + a21) * z[1] * z[2] +
+      a11 * z[2]^2
+  ) / det_val
+  
+  0.5 * (log(det_val) + quad_form)
+}
+
+
+# ------------------------------------------------------------
+# Full Strang Splitting negative log-likelihood
+# ------------------------------------------------------------
+
+SS_neg_log_lik <- function(params, data, h) {
+  # data should be an N x 2 matrix:
+  # column 1 = X
+  # column 2 = V
+  
+  a <- params[2]
+  b <- params[3]
+  c_par <- params[4]
+  
+  data_old <- data[1:(nrow(data) - 1), , drop = FALSE]
+  data_new <- data[2:nrow(data), , drop = FALSE]
+  
+  cond <- data_old[, 1] > 0
+  
+  m <- mean(data_old[, 1])
+  m2 <- mean(data_old[, 1]^2)
+  var_x <- var(data_old[, 1])
+  
+  drift_const <- 3 * a * m2 + 2 * b * m + c_par
+  
+  inner <- max((3 * a * m + b)^2 + 9 * a^2 * var_x, 0)
+  root <- sqrt(inner)
+  
+  kappa_pos <- (-b - root) / (3 * a)
+  kappa_neg <- (-b + root) / (3 * a)
+  
+  I_mats <- precompute_SS_matrices(
+    params = params,
+    drift_const = drift_const,
+    h = h
+  )
+  
+  nlls <- numeric(nrow(data_old))
+  
+  for (i in seq_len(nrow(data_old))) {
+    nlls[i] <- step_SS(
+      Y_old = data_old[i, ],
+      Y_new = data_new[i, ],
+      cond_val = cond[i],
+      h = h,
+      params = params,
+      drift_const = drift_const,
+      kappa_pos = kappa_pos,
+      kappa_neg = kappa_neg,
+      I_mats = I_mats
+    )
+  }
+  
+  sum(nlls)
+}
+```
+#Optimize
+
+```{r}
+run_estimator_lbfgs_R <- function(params_init, loss_fn,
+                                  maxiter = 1000,
+                                  tol = 1e-5,
+                                  verbose = TRUE) {
+  
+  objective <- function(params) {
+    value <- tryCatch(
+      loss_fn(params),
+      error = function(e) Inf,
+      warning = function(w) suppressWarnings(loss_fn(params))
+    )
+    
+    if (!is.finite(value)) {
+      return(1e100)
+    }
+    
+    value
+  }
+  
+  fit <- optim(
+    par = params_init,
+    fn = objective,
+    method = "L-BFGS-B",
+    control = list(
+      maxit = maxiter,
+      pgtol = tol,
+      parscale = pmax(abs(params_init), 1),
+      trace = if (verbose) 1 else 0
+    )
+  )
+  
+  if (verbose) {
+    cat("--- L-BFGS-B ---\n")
+    cat("final NLL:", fit$value, "\n")
+    cat("convergence:", fit$convergence, "\n")
+  }
+  
+  list(
+    params_hat = fit$par,
+    final_loss = fit$value,
+    convergence = fit$convergence,
+    converged = fit$convergence == 0,
+    message = fit$message,
+    counts = fit$counts,
+    optim = fit
+  )
+}
+```
+#the final
+```{r}
+theta_start <- c(
+  eta   = 50,
+  a     = -200,
+  b     = 10,
+  c     = 100,
+  d     = 10,
+  alpha = 30,
+  beta  = -5,
+  gamma = 1000
+)
+
+fit_SS <- estimate_SS_theta_R(
+  data = Ca2_final,
+  h = 0.02,
+  theta_start = theta_start,
+  maxiter = 1000,
+  tol = 1e-5,
+  verbose = TRUE
+)
+
+fit_SS$params_hat
+fit_SS$loglikelihood
+fit_SS$converged
+fit_SS$convergence
+SS_theta_checks_R(fit_SS$params_hat)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+run_estimator_lbfgs_R <- function(params_init,
+                                  loss_fn,
+                                  maxit = 1000,
+                                  tol = 1e-5,
+                                  verbose = TRUE) {
+  
+  trace_val <- if (verbose) 1 else 0
+  
+  opt <- optim(
+    par = params_init,
+    fn = loss_fn,
+    method = "L-BFGS-B",
+    control = list(
+      maxit = maxit,
+      factr = tol / .Machine$double.eps,
+      trace = trace_val
+    )
+  )
+  
+  params_hat <- opt$par
+  final_loss <- opt$value
+  
+  # optim convergence: 0 means successful convergence
+  convergence <- opt$convergence
+  
+  list(
+    params_hat = params_hat,
+    final_loss = final_loss,
+    convergence = convergence,
+    message = opt$message
+  )
+}
+```
+#Now
+```{r}
+# data must be an observed N x 2 matrix:
+# column 1 = X
+# column 2 = V
+#
+# Example:
+INIT_PARAMS <- c(
+  eta   = 50,
+  a     = -200,
+  b     = 10,
+  c     = 100,
+  d     = 10,
+  alpha = 30,
+  beta  = -5,
+  gamma = 1000
+)
+
+LBFGS_MAXITER <- 1000
+LBFGS_TOL <- 1e-5
+
+data <- cbind(Ca2_final$X,Ca2_final$V)
+
+h_obs <- 0.02
+
+loss_SS <- function(p) {
+  SS_neg_log_lik(
+    params = p,
+    data = data,
+    h = h_obs
+  )
+}
+
+fit_SS <- run_estimator_lbfgs_R(
+  params_init = INIT_PARAMS,
+  loss_fn = loss_SS,
+  maxit = LBFGS_MAXITER,
+  tol = LBFGS_TOL,
+  verbose = TRUE
+)
+
+theta_hat_SS <- fit_SS$params_hat
+
+#comparison <- data.frame(
+  #parameter = names(TRUE_PARAMS),
+  #estimate = as.numeric(theta_hat_SS),
+  #true = as.numeric(TRUE_PARAMS),
+  #error = as.numeric(theta_hat_SS - TRUE_PARAMS),
+  #relative_error = as.numeric((theta_hat_SS - TRUE_PARAMS) / TRUE_PARAMS)
+#)
+
+#print(comparison)
+print(fit_SS$convergence)
+print(fit_SS$final_loss)
+```
+
+```{r}
+params_all
+```
+
+
